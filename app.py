@@ -110,13 +110,71 @@ def feed():
     offset = (page - 1) * POSTS_PER_PAGE
 
     current_user_id = session.get('user_id')
+
+    # Daily contribution goal
+    daily_goal = 3
+    daily_progress = 0
+
+    if current_user_id:
+        daily_progress_row = query_db("""
+            SELECT COUNT(DISTINCT post_id) AS count
+            FROM (
+                SELECT post_id
+                FROM comments
+                WHERE user_id = ?
+                AND DATE(created_at) = DATE('now', 'localtime')
+
+                UNION
+
+                SELECT post_id
+                FROM reactions
+                WHERE user_id = ?
+                AND DATE(created_at) = DATE('now', 'localtime')
+            )
+        """, (current_user_id, current_user_id), one=True)
+
+        if daily_progress_row:
+            daily_progress = daily_progress_row['count']
+
+    daily_progress_display = min(daily_progress, daily_goal)
+    daily_goal_complete = daily_progress >= daily_goal
+
     params = []
 
     #  2. Build the Query 
     where_clause = ""
+
     if show == 'following' and current_user_id:
-        where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        where_clause = """
+        WHERE p.user_id IN (
+            SELECT followed_id
+            FROM follows
+            WHERE follower_id = ?
+        )
+        """
         params.append(current_user_id)
+
+    elif show == 'needs_attention' and current_user_id:
+        where_clause = """
+            WHERE p.user_id != ?
+            AND NOT EXISTS (
+                SELECT 1
+                FROM comments c
+                WHERE c.post_id = p.id
+                AND c.user_id = ?
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM reactions r_user
+                WHERE r_user.post_id = p.id
+                AND r_user.user_id = ?
+            )
+        """
+        params.extend([
+            current_user_id,
+            current_user_id,
+            current_user_id
+        ])
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -191,15 +249,49 @@ def feed():
             'comments': comments_moderated
         })
 
+        # People you may know
+        people_you_may_know = []
+
+        if current_user_id:
+            people_you_may_know = query_db("""
+                SELECT
+                    u.id,
+                    u.username,
+                    COUNT(DISTINCT mutual_follow.follower_id) AS mutual_count
+                FROM follows my_follows
+                JOIN follows mutual_follow
+                    ON my_follows.followed_id = mutual_follow.follower_id
+                JOIN users u
+                    ON mutual_follow.followed_id = u.id
+                WHERE my_follows.follower_id = ?
+                AND u.id != ?
+                AND u.id NOT IN (
+                    SELECT followed_id
+                    FROM follows
+                    WHERE follower_id = ?
+                )
+                GROUP BY u.id, u.username
+                ORDER BY mutual_count DESC, u.username ASC
+                LIMIT 5
+            """, (
+                current_user_id,
+                current_user_id,
+                current_user_id
+            ))
+
     #  4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
-                           posts=posts_data, 
-                           current_sort=sort,
-                           current_show=show,
-                           page=page, # Pass current page number
-                           per_page=POSTS_PER_PAGE, # Pass items per page
-                           reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+    return render_template('feed.html.j2',
+                       posts=posts_data,
+                       current_sort=sort,
+                       current_show=show,
+                       page=page,
+                       per_page=POSTS_PER_PAGE,
+                       reaction_emojis=REACTION_EMOJIS,
+                       reaction_types=REACTION_TYPES,
+                       daily_goal=daily_goal,
+                       daily_progress=daily_progress_display,
+                       daily_goal_complete=daily_goal_complete,
+                       people_you_may_know=people_you_may_know)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -570,7 +662,7 @@ def add_reaction():
                    (new_reaction_type, existing_reaction['id']))
     else:
         # Step 3: If it does not exist, INSERT a new reaction.
-        db.execute('INSERT INTO reactions (post_id, user_id, reaction_type) VALUES (?, ?, ?)',
+        db.execute('INSERT INTO reactions (post_id, user_id, reaction_type, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)',
                    (post_id, user_id, new_reaction_type))
 
     db.commit()
