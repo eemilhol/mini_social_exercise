@@ -6,21 +6,120 @@
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
 </div>
 
+
 {% if session.get('user_id') %}
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
       <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
+
+      <form action="{{ url_for('add_post') }}"
+            method="POST"
+            id="new-post-form">
+
         <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          <textarea
+            class="form-control"
+            id="post-content"
+            name="content"
+            rows="3"
+            placeholder="What's on your mind, {{ session.get('username') }}?"
+            required></textarea>
         </div>
-        <button type="submit" class="btn btn-primary float-end">Post</button>
+
+        <!-- Moderation results -->
+        <div id="moderation-result"
+             class="alert d-none"
+             role="status">
+        </div>
+
+        <div class="d-flex justify-content-end gap-2">
+          <button type="button"
+                  id="check-content-btn"
+                  class="btn btn-primary">
+            Check content
+          </button>
+
+          <button type="submit" class="btn btn-primary">
+            Post
+          </button>
+        </div>
+
       </form>
     </div>
   </div>
 </div>
 {% endif %}
+
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const textarea = document.getElementById('post-content');
+    const checkButton = document.getElementById('check-content-btn');
+    const resultBox = document.getElementById('moderation-result');
+
+    if (!textarea || !checkButton || !resultBox) return;
+
+    // Hide old moderation results when the text changes.
+    textarea.addEventListener('input', function () {
+        resultBox.className = 'alert d-none';
+        resultBox.textContent = '';
+    });
+
+    checkButton.addEventListener('click', async function () {
+        const content = textarea.value;
+
+        if (!content.trim()) {
+            resultBox.className = 'alert alert-warning';
+            resultBox.textContent = 'Please write something first.';
+            return;
+        }
+
+        checkButton.disabled = true;
+        checkButton.textContent = 'Checking...';
+
+        try {
+            const response = await fetch(
+                "{{ url_for('check_post_content') }}",
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ content: content })
+                }
+            );
+
+            if (!response.ok) {
+                throw new Error('Moderation request failed');
+            }
+
+            const data = await response.json();
+
+            resultBox.className = data.risk_score === 0
+                ? 'alert alert-success'
+                : data.allowed
+                    ? 'alert alert-warning'
+                    : 'alert alert-danger';
+
+            resultBox.textContent =
+                data.message +
+                '\nRisk score: ' + data.risk_score +
+                '\nModerated preview: ' + data.moderated_content;
+
+            resultBox.style.whiteSpace = 'pre-line';
+
+        } catch (error) {
+            resultBox.className = 'alert alert-danger';
+            resultBox.textContent = 'Content check failed. Please try again.';
+        } finally {
+            checkButton.disabled = false;
+            checkButton.textContent = 'Check content';
+        }
+    });
+});
+</script>
+
 
 {% if session.get('user_id') %}
 <div class="col-md-8 mx-auto mb-4">

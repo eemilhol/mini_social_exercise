@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -304,25 +305,67 @@ def add_post():
         return redirect(url_for('login'))
 
     # Get content from the submitted form
-    content = request.form.get('content')
+    content = request.form.get('content', '')
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    if not content.strip():
+        flash('Post cannot be empty.', 'warning')
+        return redirect(url_for('feed'))
 
-    # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
-        db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
-        db.commit()
-        flash('Your post was successfully created!', 'success')
+    # Moderate content before storing it
+    moderated_content, risk_score = moderate_content(content)
+
+    # Reject content that violates serious rules
+    if risk_score >= 5.0:
+        flash('Your post was rejected due to a serious rule violation.', 'danger')
+        return redirect(url_for('feed'))
+
+    if not moderated_content.strip():
+        flash('Post cannot be empty after moderation.', 'danger')
+        return redirect(url_for('feed'))
+
+    db = get_db()
+
+    # Keep the original text in the database so that
+    # user risk analysis can evaluate the violations.
+    db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
+               (user_id, content))
+    db.commit()
+
+    if risk_score > 0:
+        flash('Your post was created with moderated content.', 'warning')
     else:
-        # This will catch empty posts or posts that were fully censored
-        flash('Post cannot be empty or was fully censored.', 'warning')
+        flash('Your post was successfully created!', 'success')
 
     # Redirect back to the main feed to see the new post
     return redirect(url_for('feed'))
-    
+
+@app.route('/posts/check-content', methods=['POST'])
+def check_post_content():
+    """Check post content and return moderation results as JSON."""
+    if not session.get('user_id'):
+        return jsonify({'error': 'Login required'}), 401
+
+    data = request.get_json(silent=True) or {}
+    content = data.get('content', '')
+
+    if not isinstance(content, str):
+        return jsonify({'error': 'Invalid content'}), 400
+
+    moderated_content, risk_score = moderate_content(content)
+
+    if risk_score >= 5.0:
+        message = 'Serious rule violation. This post cannot be published.'
+    elif risk_score > 0:
+        message = 'Potential rule violation detected. Please review your text.'
+    else:
+        message = 'No rule violations detected.'
+
+    return jsonify({
+        'moderated_content': moderated_content,
+        'risk_score': risk_score,
+        'message': message,
+        'allowed': risk_score < 5.0
+    })
     
 @app.route('/posts/<int:post_id>/delete', methods=['POST'])
 def delete_post(post_id):
@@ -976,9 +1019,87 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
+    
+    # Get user profile and registration date.
+    user = query_db("""
+        SELECT profile, created_at
+        FROM users
+        WHERE id = ?
+    """, (user_id,), one=True)
 
-    return score;
+    if user is None:
+        return 0.0
+
+    # Calculate the risk score of the user's profile.
+    _, profile_score = moderate_content(user['profile'] or "")
+
+    # Get all posts and comments created by the user.
+    posts = query_db(
+        "SELECT content FROM posts WHERE user_id = ?",
+        (user_id,)
+    ) or []
+
+    comments = query_db(
+        "SELECT content FROM comments WHERE user_id = ?",
+        (user_id,)
+    ) or []
+
+    # Calculate the average risk score of posts.
+    post_scores = [
+        moderate_content(post['content'])[1]
+        for post in posts
+    ]
+
+    average_post_score = (
+        sum(post_scores) / len(post_scores)
+        if post_scores else 0.0
+    )
+
+    # Calculate the average risk score of comments.
+    comment_scores = [
+        moderate_content(comment['content'])[1]
+        for comment in comments
+    ]
+
+    average_comment_score = (
+        sum(comment_scores) / len(comment_scores)
+        if comment_scores else 0.0
+    )
+
+    # Apply the content weights defined in the rules.
+    content_risk_score = (
+        profile_score
+        + average_post_score * 3
+        + average_comment_score
+    )
+
+    # Calculate account age.
+    created_at = user['created_at']
+
+    if isinstance(created_at, str):
+        created_at = datetime.strptime(
+            created_at, '%Y-%m-%d %H:%M:%S'
+        )
+
+    account_age_days = max(
+        0, (datetime.utcnow() - created_at).days
+    )
+
+    # New accounts receive a higher risk multiplier.
+    if account_age_days < 7:
+        multiplier = 1.5
+    elif account_age_days < 30:
+        multiplier = 1.2
+    else:
+        multiplier = 1.0
+
+    # Cap the final risk score at 5.0.
+    user_risk_score = min(
+        5.0, content_risk_score * multiplier
+    )
+
+    return float(user_risk_score)
+
 
     
 # Assignment 2.1
@@ -999,10 +1120,71 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
-    moderated_content = content
-    score = 0
     
+    # Handle empty content safely.
+    if content is None:
+        return "", 0.0
+
+    moderated_content = str(content)
+    score = 0.0
+
+    # Tier 1: Severe violations.
+    # A single whole-word match removes the entire content.
+    for word in TIER1_WORDS:
+        pattern = r'\b' + re.escape(word) + r'\b'
+        if re.search(pattern, moderated_content, re.IGNORECASE):
+            return "[content removed due to severe violation]", 5.0
+
+    # Tier 2: Spam and scam phrases.
+    # This check is performed only if no Tier 1 violation was found.
+    for phrase in TIER2_PHRASES:
+        pattern = r'(?<!\w)' + re.escape(phrase) + r'(?!\w)'
+        if re.search(pattern, moderated_content, re.IGNORECASE):
+            return "[content removed due to spam/scam policy]", 5.0
+
+    # Check excessive capitalization using the original content.
+    letters = [char for char in moderated_content if char.isalpha()]
+
+    if len(letters) > 15:
+        uppercase_count = sum(1 for char in letters if char.isupper())
+        uppercase_ratio = uppercase_count / len(letters)
+
+        if uppercase_ratio > 0.70:
+            score += 0.5
+
+    # Tier 3: Mild profanity.
+    # Replace every matched word with equally many asterisks.
+    for word in TIER3_WORDS:
+        pattern = r'\b' + re.escape(word) + r'\b'
+
+        def censor_word(match):
+            nonlocal score
+            score += 2.0
+            return '*' * len(match.group())
+
+        moderated_content = re.sub(
+            pattern,
+            censor_word,
+            moderated_content,
+            flags=re.IGNORECASE
+        )
+
+    # Remove external links and add 2 points for each URL.
+    url_pattern = r'(?i)\b(?:https?://|www\.)[^\s<>"\']+'
+
+    def censor_link(match):
+        nonlocal score
+        score += 2.0
+        return "[link removed]"
+
+    moderated_content = re.sub(
+        url_pattern,
+        censor_link,
+        moderated_content
+    )
+
     return moderated_content, score
+
 
 # Coding Assignment #3
 # Assignment 3.1
