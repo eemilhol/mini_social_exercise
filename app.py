@@ -1,5 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
-from flask import jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -250,35 +249,35 @@ def feed():
             'comments': comments_moderated
         })
 
-        # People you may know
-        people_you_may_know = []
+    # People you may know
+    people_you_may_know = []
 
-        if current_user_id:
-            people_you_may_know = query_db("""
-                SELECT
-                    u.id,
-                    u.username,
-                    COUNT(DISTINCT mutual_follow.follower_id) AS mutual_count
-                FROM follows my_follows
-                JOIN follows mutual_follow
-                    ON my_follows.followed_id = mutual_follow.follower_id
-                JOIN users u
-                    ON mutual_follow.followed_id = u.id
-                WHERE my_follows.follower_id = ?
-                AND u.id != ?
-                AND u.id NOT IN (
-                    SELECT followed_id
-                    FROM follows
-                    WHERE follower_id = ?
-                )
-                GROUP BY u.id, u.username
-                ORDER BY mutual_count DESC, u.username ASC
-                LIMIT 5
-            """, (
-                current_user_id,
-                current_user_id,
-                current_user_id
-            ))
+    if current_user_id:
+        people_you_may_know = query_db("""
+            SELECT
+                u.id,
+                u.username,
+                COUNT(DISTINCT mutual_follow.follower_id) AS mutual_count
+            FROM follows my_follows
+            JOIN follows mutual_follow
+                ON my_follows.followed_id = mutual_follow.follower_id
+            JOIN users u
+                ON mutual_follow.followed_id = u.id
+            WHERE my_follows.follower_id = ?
+            AND u.id != ?
+            AND u.id NOT IN (
+                SELECT followed_id
+                FROM follows
+                WHERE follower_id = ?
+            )
+            GROUP BY u.id, u.username
+            ORDER BY mutual_count DESC, u.username ASC
+            LIMIT 5
+        """, (
+            current_user_id,
+            current_user_id,
+            current_user_id
+        ))
 
     #  4. Render Template with Pagination Info 
     return render_template('feed.html.j2',
@@ -991,6 +990,42 @@ def admin_delete_comment(comment_id):
 def rules():
     return render_template('rules.html.j2')
 
+# Assignment 3 - Design Claim 11:
+# Give potential newcomers a realistic preview of the community.
+@app.route('/explore')
+def explore():
+    # Retrieve current community statistics.
+    stats = query_db("""
+        SELECT
+            (SELECT COUNT(*) FROM users) AS users,
+            (SELECT COUNT(*) FROM posts) AS posts,
+            (SELECT COUNT(*) FROM comments) AS comments
+    """, one=True)
+
+    # Show five recent posts as examples of community discussions.
+    recent_posts = query_db("""
+        SELECT p.id, p.content, p.created_at,
+               u.username
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        ORDER BY p.created_at DESC, p.id DESC
+        LIMIT 5
+    """) or []
+
+    # Apply the existing moderation rules before displaying posts.
+    preview_posts = []
+
+    for post in recent_posts:
+        post_data = dict(post)
+        post_data['content'], _ = moderate_content(post_data['content'])
+        preview_posts.append(post_data)
+
+    return render_template(
+        'explore.html.j2',
+        stats=stats,
+        preview_posts=preview_posts
+    )
+
 @app.template_global()
 def loop_color(user_id):
     # Generate a pastel color based on user_id hash
@@ -1208,9 +1243,139 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    
+    # Positive reactions used to learn the user's interests.
+    positive_reactions = ('like', 'love', 'laugh', 'wow')
 
-    return recommended_posts;
+    # Common words that do not help identify topics.
+    stop_words = {
+        'the', 'and', 'for', 'that', 'this', 'with', 'from',
+        'have', 'has', 'are', 'was', 'were', 'you', 'your',
+        'about', 'just', 'what', 'when', 'where', 'how',
+        'but', 'not', 'all', 'can', 'will', 'our', 'out',
+        'its', 'into', 'they', 'them', 'their', 'there',
+        'here', 'some', 'more', 'than', 'then', 'been',
+        'also', 'would', 'could', 'should', 'very', 'really',
+        'like', 'love', 'post', 'today'
+    }
+
+    def get_keywords(text):
+        """Extract meaningful lowercase words from a post."""
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+        return set(word for word in words if word not in stop_words)
+
+    # Get accounts followed by the current user.
+    followed_users = set()
+
+    if user_id:
+        followed_rows = query_db(
+            "SELECT followed_id FROM follows WHERE follower_id = ?",
+            (user_id,)
+        ) or []
+
+        followed_users = {
+            row['followed_id'] for row in followed_rows
+        }
+
+    # Find posts that received positive reactions from this user.
+    liked_posts = []
+    reacted_post_ids = set()
+
+    if user_id:
+        reaction_rows = query_db("""
+            SELECT r.post_id, r.reaction_type, p.content
+            FROM reactions r
+            JOIN posts p ON r.post_id = p.id
+            WHERE r.user_id = ?
+        """, (user_id,)) or []
+
+        reacted_post_ids = {
+            row['post_id'] for row in reaction_rows
+        }
+
+        liked_posts = [
+            row for row in reaction_rows
+            if row['reaction_type'] in positive_reactions
+        ]
+
+    # Build a keyword profile based on positive reactions.
+    interest_keywords = set()
+
+    for post in liked_posts:
+        interest_keywords.update(get_keywords(post['content']))
+
+    # Retrieve candidate posts.
+    query = """
+        SELECT p.id, p.content, p.created_at,
+               u.username, u.id AS user_id
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+    """
+
+    parameters = []
+    conditions = []
+
+    if user_id:
+        # Do not recommend the user's own posts.
+        conditions.append("p.user_id != ?")
+        parameters.append(user_id)
+
+    if filter_following:
+        if not user_id or not followed_users:
+            return []
+
+        placeholders = ",".join("?" for _ in followed_users)
+        conditions.append(
+            f"p.user_id IN ({placeholders})"
+        )
+        parameters.extend(sorted(followed_users))
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    candidates = query_db(query, tuple(parameters)) or []
+
+    # Calculate a relevance score for every candidate.
+    scored_posts = []
+
+    for post in candidates:
+        # Skip posts the user has already reacted to.
+        if post['id'] in reacted_post_ids:
+            continue
+
+        post_keywords = get_keywords(post['content'])
+
+        # Matching interests are the main recommendation signal.
+        matching_keywords = interest_keywords.intersection(
+            post_keywords
+        )
+
+        score = len(matching_keywords) * 3
+
+        # Give extra weight to followed authors.
+        if post['user_id'] in followed_users:
+            score += 5
+
+        scored_posts.append((score, post))
+
+    # Select the five most relevant posts.
+    # Newer posts win when relevance scores are equal.
+    scored_posts.sort(
+        key=lambda item: (item[0], item[1]['created_at']),
+        reverse=True
+    )
+
+    recommended_posts = [
+        post for score, post in scored_posts[:5]
+    ]
+
+    # Return recommendations in reverse-chronological order.
+    recommended_posts.sort(
+        key=lambda post: post['created_at'],
+        reverse=True
+    )
+
+    return recommended_posts
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

@@ -1,0 +1,87 @@
+{% extends "base.html.j2" %}
+{% block content %}
+
+<div class="col-md-9 mx-auto">
+
+  <!-- Introduction for potential new members -->
+  <div class="text-center mb-5">
+    <h1>Explore MiniSocial</h1>
+    <p class="lead">
+      Discover our community before joining.
+      See what people are discussing and decide
+      whether MiniSocial is right for you.
+    </p>
+  </div>
+
+  <!-- Real community statistics -->
+  <div class="row text-center mb-5">
+    <div class="col-md-4 mb-3">
+      <div class="card shadow-sm p-3">
+        <h2>{{ stats.users }}</h2>
+        <p class="mb-0">Members</p>
+      </div>
+    </div>
+
+    <div class="col-md-4 mb-3">
+      <div class="card shadow-sm p-3">
+        <h2>{{ stats.posts }}</h2>
+        <p class="mb-0">Posts</p>
+      </div>
+    </div>
+
+    <div class="col-md-4 mb-3">
+      <div class="card shadow-sm p-3">
+        <h2>{{ stats.comments }}</h2>
+        <p class="mb-0">Comments</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Real discussions from existing members -->
+  <h3 class="mb-3">Recent community discussions</h3>
+
+  {% for post in preview_posts %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <h5 class="card-title">@{{ post.username }}</h5>
+      <p class="card-text">{{ post.content }}</p>
+      <small class="text-muted">
+        {{ post.created_at|datetimeformat }}
+      </small>
+    </div>
+  </div>
+  {% else %}
+  <p>No discussions available yet.</p>
+  {% endfor %}
+
+  <!-- Community expectations -->
+  <div class="card shadow-sm my-4">
+    <div class="card-body">
+      <h3>What to expect from MiniSocial</h3>
+      <p>
+        MiniSocial is a community where members can publish posts,
+        react to discussions, follow other users and exchange comments.
+        Members are expected to communicate respectfully and follow
+        the community guidelines.
+      </p>
+      <a href="{{ url_for('rules') }}" class="btn btn-primary">
+        Read community rules
+      </a>
+    </div>
+  </div>
+
+  <!-- Invitation to participate -->
+  <div class="text-center my-5">
+    <h3>Interested in joining?</h3>
+    <p>
+      Create an account to participate in discussions,
+      follow members and share your own posts.
+    </p>
+    <a href="{{ url_for('signup') }}" class="btn btn-primary">
+      Join MiniSocial
+    </a>
+  </div>
+
+</div>
+
+{% endblock %}
